@@ -1,0 +1,33 @@
+services:
+  - type: worker
+    name: pfp-bot-worker
+    env: python
+    plan: free
+    autoDeploy: true
+    buildCommand: pip install --no-cache-dir -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: X_API_KEY
+        sync: false
+      - key: X_API_SECRET
+        sync: false
+      - key: X_ACCESS_TOKEN
+        sync: false
+      - key: X_ACCESS_TOKEN_SECRET
+        sync: false
+      - key: X_BEARER_TOKEN
+        sync: false
+      - key: REPLICATE_API_TOKEN
+        sync: false
+      - key: MODEL_REF
+        value: google/nano-banana
+      - key: NANO_PROMPT
+        sync: false
+      - key: SUNGLASSES_URL
+        sync: false
+      - key: BACKGROUND_URL
+        sync: false
+      - key: BOT_HANDLE
+        sync: false
+      - key: POLL_SECONDS
+        value: "25"
