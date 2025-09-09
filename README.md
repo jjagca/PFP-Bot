@@ -1,2 +1,51 @@
-# PFP-Bot
-A bot that puts cool sunglasses on images that tag it via X.
+# Twitter Replicate Bot (Polling)
+
+A minimal polling bot for X (Twitter) that:
+- Listens for mentions of your bot handle.
+- **Only** processes tweets that include a photo.
+- Sends the photo + your two static assets (sunglasses, gradient) to **google/nano-banana** on Replicate.
+- Replies to the tweet with the edited PNG.
+
+## Quick start (local)
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env   # fill in your keys & URLs
+python main.py
+```
+
+The bot will poll every `POLL_SECONDS` seconds (default 25). It saves the last seen tweet ID to `.last_id`.
+
+## Environment variables
+
+See `.env.example`. Required:
+
+- `X_API_KEY`, `X_API_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_TOKEN_SECRET`, `X_BEARER_TOKEN`
+- `REPLICATE_API_TOKEN`
+- `MODEL_REF` (default `google/nano-banana`)
+- `NANO_PROMPT` (your fixed instruction)
+- `SUNGLASSES_URL` and `BACKGROUND_URL` (public URLs, e.g., GitHub RAW)
+- `BOT_HANDLE` (without @)
+- `POLL_SECONDS` (integer, e.g., 25 or 30)
+
+## Render (free tier) deploy
+
+1. Push this repo to GitHub.
+2. On **render.com** → **New** → **Web Service** → pick your repo.
+3. **Environment:** Python 3.11
+4. **Build Command:** `pip install --no-cache-dir -r requirements.txt`
+5. **Start Command:** `python main.py`
+6. Add all env vars from `.env.example` in the Render dashboard.
+7. Deploy and watch logs. You should see: `🚀 bot up. last_id=None`.
+
+> Free tier may sleep/ pause. For always-on, switch the instance to Starter.
+
+## Notes
+- Bot **ignores tweets without photos**.
+- Uses three inputs for nano-banana: `[person_photo_url, SUNGLASSES_URL, BACKGROUND_URL]`.
+- Replies with a PNG via v1.1 media upload.
+- Do **not** commit `.env` or real secrets. Keep `.env` out of git.
+
+## License
+MIT
