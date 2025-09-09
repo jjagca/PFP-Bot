@@ -2,3 +2,5 @@ tweepy
 requests
 replicate
 python-dotenv
+fastapi
+uvicorn[standard]
