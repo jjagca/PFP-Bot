@@ -49,9 +49,9 @@ def load_last_id():
         return None
 
 
-def save_last_id(tid: str):
+def save_last_id(tid) -> None:
     with open(LAST_ID_FILE, "w") as f:
-        f.write(tid)
+        f.write(str(tid))
 
 
 def fetch_mentions(since_id=None):
