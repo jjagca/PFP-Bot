@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+.env
+
+# Local state
+.last_id
+
+# OS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/

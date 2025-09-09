@@ -1,0 +1,4 @@
+tweepy
+requests
+replicate
+python-dotenv

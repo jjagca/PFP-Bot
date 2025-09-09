@@ -48,6 +48,7 @@ def load_last_id():
     except FileNotFoundError:
         return None
 
+
 def save_last_id(tid: str):
     with open(LAST_ID_FILE, "w") as f:
         f.write(tid)
@@ -65,13 +66,16 @@ def fetch_mentions(since_id=None):
         max_results=50,
     )
 
+
 def username_map_from_includes(includes):
     users = getattr(includes, "users", []) if includes else []
     return {str(u.id): u.username for u in users}
 
+
 def media_map_from_includes(includes):
     media = getattr(includes, "media", []) if includes else []
     return {m.media_key: m for m in media}
+
 
 def first_photo_url(tweet, media_map):
     keys = (tweet.attachments.media_keys if tweet.attachments else []) or []
@@ -81,16 +85,19 @@ def first_photo_url(tweet, media_map):
             return m.url
     return None
 
+
 def write_bytes_tmp(content: bytes, suffix=".png") -> str:
     fd, path = tempfile.mkstemp(suffix=suffix)
     with os.fdopen(fd, "wb") as f:
         f.write(content)
     return path
 
+
 def download_tmp(url: str, suffix=".png") -> str:
     r = requests.get(url, timeout=60)
     r.raise_for_status()
     return write_bytes_tmp(r.content, suffix)
+
 
 def run_nano_banana(person_url: str, sunglasses_url: str, background_url: str, prompt: str) -> str:
     """
@@ -122,9 +129,11 @@ def run_nano_banana(person_url: str, sunglasses_url: str, background_url: str, p
     except Exception:
         raise RuntimeError(f"Unexpected Replicate output type: {type(out)}")
 
+
 def upload_media(path: str) -> str:
     media = api_v1.media_upload(filename=path)
     return str(media.media_id)
+
 
 def reply_with_media(in_reply_to_tweet_id: str, media_id: str, username: str):
     client.create_tweet(
@@ -132,6 +141,7 @@ def reply_with_media(in_reply_to_tweet_id: str, media_id: str, username: str):
         in_reply_to_tweet_id=in_reply_to_tweet_id,
         media={"media_ids": [media_id]},
     )
+
 
 def process_tweet(tweet, usernames, media_map):
     # Only proceed if tweet has a photo; otherwise ignore
@@ -154,6 +164,7 @@ def process_tweet(tweet, usernames, media_map):
             os.remove(out_path)
         except Exception:
             pass
+
 
 def main():
     last_id = load_last_id()
