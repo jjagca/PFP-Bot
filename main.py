@@ -41,7 +41,7 @@ api_v1 = tweepy.API(auth, wait_on_rate_limit=True)
 print("Tweepy version:", tweepy.__version__)
 
 # Replicate
-ios.environ["REPLICATE_API_TOKEN"] = os.getenv("REPLICATE_API_TOKEN")
+os.environ["REPLICATE_API_TOKEN"] = os.getenv("REPLICATE_API_TOKEN")
 
 def load_last_id():
     try:
