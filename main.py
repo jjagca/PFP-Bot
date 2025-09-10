@@ -38,8 +38,10 @@ auth = tweepy.OAuth1UserHandler(
 )
 api_v1 = tweepy.API(auth, wait_on_rate_limit=True)
 
+print("Tweepy version:", tweepy.__version__)
+
 # Replicate
-os.environ["REPLICATE_API_TOKEN"] = os.getenv("REPLICATE_API_TOKEN")
+ios.environ["REPLICATE_API_TOKEN"] = os.getenv("REPLICATE_API_TOKEN")
 
 def load_last_id():
     try:
@@ -158,18 +160,54 @@ def upload_media(path: str) -> str:
 
 
 def reply_with_media(in_reply_to_tweet_id: str, media_id: str, username: str):
-    client.create_tweet(
-        text=f"@{username}",
-        in_reply_to_tweet_id=in_reply_to_tweet_id,
-        media={"media_ids": [media_id]},
-    )
+    """
+    Try multiple Tweepy signatures for compatibility.
+    1. Older v2 style: media_ids=[...] (no 'media' dict)
+    2. Newer style (if available): reply={}, media={}
+    3. v1.1 fallback via api_v1.update_status
+    """
+    text = f"@{username}"
+
+    # Attempt 1: flattened media_ids + in_reply_to_tweet_id
+    try:
+        client.create_tweet(
+            text=text,
+            in_reply_to_tweet_id=in_reply_to_tweet_id,
+            media_ids=[media_id],
+        )
+        return
+    except TypeError:
+        pass
+
+    # Attempt 2: nested dict style
+    try:
+        client.create_tweet(
+            text=text,
+            reply={"in_reply_to_tweet_id": in_reply_to_tweet_id},
+            media={"media_ids": [media_id]},
+        )
+        return
+    except TypeError:
+        pass
+
+    # Attempt 3: v1.1 fallback
+    try:
+        api_v1.update_status(
+            status=text,
+            in_reply_to_status_id=in_reply_to_tweet_id,
+            auto_populate_reply_metadata=True,
+            media_ids=[media_id],
+        )
+        return
+    except Exception as e:
+        print("⚠️ failed to send reply via all methods:", e)
 
 
 def process_tweet(tweet, usernames, media_map):
     person_url = first_photo_url(tweet, media_map)
     if not person_url:
         has_attachments = bool(getattr(tweet, "attachments", None))
-        print(f"⏭️  {tweet.id}: no usable photo (attachments={{has_attachments}}); skipping.")
+        print(f"⏭️  {tweet.id}: no usable photo (attachments={has_attachments}); skipping.")
         return
     if not SUNGLASSES_URL or not BACKGROUND_URL:
         print("❗ Set SUNGLASSES_URL and BACKGROUND_URL in your environment")
@@ -190,7 +228,7 @@ def process_tweet(tweet, usernames, media_map):
 
 def main():
     last_id = load_last_id()
-    print(f"🚀 bot up. last_id={{last_id}}")
+    print(f"🚀 bot up. last_id={last_id}")
     while True:
         try:
             resp = fetch_mentions(last_id)
