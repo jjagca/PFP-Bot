@@ -61,27 +61,51 @@ def fetch_mentions(since_id=None):
         since_id=since_id,
         tweet_fields="id,author_id,attachments,created_at",
         expansions="author_id,attachments.media_keys",
-        media_fields="url,type",
+        media_fields="url,type,preview_image_url",
         user_fields="username",
         max_results=50,
     )
 
+# ---- Helpers to normalize Tweepy response structures (object vs dict style) ----
+
+def _get_includes_collection(includes, key):
+    if not includes:
+        return []
+    if isinstance(includes, dict):
+        return includes.get(key, []) or []
+    return getattr(includes, key, []) or []
+
 
 def username_map_from_includes(includes):
-    users = getattr(includes, "users", []) if includes else []
+    users = _get_includes_collection(includes, "users")
     return {str(u.id): u.username for u in users}
 
 
 def media_map_from_includes(includes):
-    media = getattr(includes, "media", []) if includes else []
-    return {m.media_key: m for m in media}
+    media_items = _get_includes_collection(includes, "media")
+    result = {}
+    for m in media_items:
+        mk = getattr(m, "media_key", None)
+        if mk:
+            result[mk] = m
+    return result
+
+
+def _extract_media_keys(attachments):
+    if not attachments:
+        return []
+    if isinstance(attachments, dict):
+        return attachments.get("media_keys", []) or []
+    return getattr(attachments, "media_keys", []) or []
 
 
 def first_photo_url(tweet, media_map):
-    keys = (tweet.attachments.media_keys if tweet.attachments else []) or []
+    keys = _extract_media_keys(getattr(tweet, "attachments", None))
     for k in keys:
         m = media_map.get(k)
-        if m and m.type == "photo" and getattr(m, "url", None):
+        if not m:
+            continue
+        if getattr(m, "type", None) == "photo" and getattr(m, "url", None):
             return m.url
     return None
 
@@ -100,9 +124,7 @@ def download_tmp(url: str, suffix=".png") -> str:
 
 
 def run_nano_banana(person_url: str, sunglasses_url: str, background_url: str, prompt: str) -> str:
-    """
-    Calls google/nano-banana with three inputs and returns local PNG path.
-    """
+    """Calls google/nano-banana with three inputs and returns local PNG path."""
     out = replicate.run(
         MODEL_REF,
         input={
@@ -144,10 +166,10 @@ def reply_with_media(in_reply_to_tweet_id: str, media_id: str, username: str):
 
 
 def process_tweet(tweet, usernames, media_map):
-    # Only proceed if tweet has a photo; otherwise ignore
     person_url = first_photo_url(tweet, media_map)
     if not person_url:
-        print(f"⏭️  {tweet.id}: no photo attached; skipping.")
+        has_attachments = bool(getattr(tweet, "attachments", None))
+        print(f"⏭️  {tweet.id}: no usable photo (attachments={{has_attachments}}); skipping.")
         return
     if not SUNGLASSES_URL or not BACKGROUND_URL:
         print("❗ Set SUNGLASSES_URL and BACKGROUND_URL in your environment")
@@ -168,7 +190,7 @@ def process_tweet(tweet, usernames, media_map):
 
 def main():
     last_id = load_last_id()
-    print(f"🚀 bot up. last_id={last_id}")
+    print(f"🚀 bot up. last_id={{last_id}}")
     while True:
         try:
             resp = fetch_mentions(last_id)
