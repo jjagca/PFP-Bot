@@ -17,6 +17,10 @@ SUNGLASSES_URL = os.getenv("SUNGLASSES_URL")
 BACKGROUND_URL = os.getenv("BACKGROUND_URL")
 LAST_ID_FILE   = ".last_id"
 
+# Twitter-as-state config
+SKIP_IF_LIKED       = os.getenv("SKIP_IF_LIKED", "1").lower() not in ("0", "false", "no")
+LIKED_PRELOAD_LIMIT = int(os.getenv("LIKED_PRELOAD_LIMIT", "500"))
+
 if not BOT_HANDLE:
     raise RuntimeError("BOT_HANDLE is required (without the @).")
 
@@ -42,6 +46,11 @@ print("Tweepy version:", tweepy.__version__)
 
 # Replicate
 os.environ["REPLICATE_API_TOKEN"] = os.getenv("REPLICATE_API_TOKEN")
+
+# In-memory cache of liked tweet IDs for the authenticated bot
+MY_USER_ID = None
+LIKED_IDS = set()
+
 
 def load_last_id():
     try:
@@ -203,7 +212,68 @@ def reply_with_media(in_reply_to_tweet_id: str, media_id: str, username: str):
         print("⚠️ failed to send reply via all methods:", e)
 
 
+# ---------- Twitter-as-state helpers (likes) ----------
+
+def _get_next_token(meta):
+    # Works whether Tweepy returns dict-like or object-like meta
+    try:
+        # dict-like
+        return meta.get("next_token")
+    except Exception:
+        pass
+    try:
+        # object-like
+        return getattr(meta, "next_token", None)
+    except Exception:
+        return None
+
+
+def resolve_my_user_id():
+    me = client.get_me()
+    if not me or not me.data:
+        raise RuntimeError("Unable to resolve authenticated user via client.get_me()")
+    return str(me.data.id)
+
+
+def preload_liked_ids(user_id: str, limit: int = 500) -> set:
+    liked = set()
+    pagination_token = None
+    while len(liked) < limit:
+        resp = client.get_liked_tweets(
+            id=user_id,
+            max_results=100,
+            pagination_token=pagination_token,
+            tweet_fields="id",
+        )
+        if not resp or not resp.data:
+            break
+        for t in resp.data:
+            liked.add(str(t.id))
+            if len(liked) >= limit:
+                break
+        meta = getattr(resp, "meta", {}) or {}
+        pagination_token = _get_next_token(meta)
+        if not pagination_token:
+            break
+    print(f"💾 preloaded {len(liked)} liked tweet IDs (limit={limit})")
+    return liked
+
+
+def like_tweet(tweet_id: str):
+    try:
+        client.like(tweet_id)
+        return True
+    except Exception as e:
+        print(f"⚠️ failed to like tweet {tweet_id}: {e}")
+        return False
+
+
 def process_tweet(tweet, usernames, media_map):
+    # Skip if already liked by the bot (Twitter-as-state)
+    if SKIP_IF_LIKED and str(tweet.id) in LIKED_IDS:
+        print(f"⏭️  {tweet.id}: already liked; skipping.")
+        return
+
     person_url = first_photo_url(tweet, media_map)
     if not person_url:
         has_attachments = bool(getattr(tweet, "attachments", None))
@@ -219,6 +289,12 @@ def process_tweet(tweet, usernames, media_map):
         handle = usernames.get(str(tweet.author_id), "")
         reply_with_media(tweet.id, media_id, handle)
         print(f"✅ Replied to {tweet.id} (@{handle})")
+
+        # Like after successful reply and add to cache
+        if SKIP_IF_LIKED:
+            if like_tweet(tweet.id):
+                LIKED_IDS.add(str(tweet.id))
+                print(f"⭐ Liked mention {tweet.id} to mark as processed.")
     finally:
         try:
             os.remove(out_path)
@@ -227,12 +303,25 @@ def process_tweet(tweet, usernames, media_map):
 
 
 def main():
+    global MY_USER_ID, LIKED_IDS
+
+    # Resolve bot user and preload likes once on startup
+    try:
+        MY_USER_ID = resolve_my_user_id()
+        print(f"👤 Authenticated as user_id={MY_USER_ID}")
+        if SKIP_IF_LIKED:
+            LIKED_IDS = preload_liked_ids(MY_USER_ID, LIKED_PRELOAD_LIMIT)
+    except Exception as e:
+        print(f"⚠️ could not initialize likes state: {e}")
+        # Continue without likes state if desired
+
     last_id = load_last_id()
-    print(f"🚀 bot up. last_id={last_id}")
+    print(f"🚀 bot up. last_id={last_id} skip_if_liked={SKIP_IF_LIKED}")
+
     while True:
         try:
             resp = fetch_mentions(last_id)
-            if resp.data:
+            if resp and resp.data:
                 tweets = sorted(resp.data, key=lambda t: int(t.id))
                 usernames = username_map_from_includes(resp.includes)
                 media_map = media_map_from_includes(resp.includes)
@@ -245,6 +334,7 @@ def main():
         except Exception as e:
             print("⚠️ error:", e)
         time.sleep(POLL_SECONDS)
+
 
 if __name__ == "__main__":
     main()
