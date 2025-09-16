@@ -2,9 +2,10 @@
 
 A minimal polling bot for X (Twitter) that:
 - Listens for mentions of your bot handle.
-- **Only** processes tweets that include a photo.
-- Sends the photo + your two static assets (sunglasses, gradient) to **google/nano-banana** on Replicate.
+- Processes tweets with photos OR uses profile pictures as image sources.
+- Sends the person image + your two static assets (sunglasses, gradient) to **google/nano-banana** on Replicate.
 - Replies to the tweet with the edited PNG.
+- Avoids duplicate processing by tracking liked tweets.
 
 ## Quick start (local)
 
@@ -29,6 +30,10 @@ See `.env.example`. Required:
 - `BOT_HANDLE` (without @)
 - `POLL_SECONDS` (integer, e.g., 25 or 30)
 
+Optional:
+- `SKIP_IF_LIKED` (default `1`) - Skip tweets the bot has already liked
+- `LIKED_PRELOAD_LIMIT` (default `500`) - Number of recent liked tweets to preload
+
 ## Render (free tier) deploy
 
 1. Push this repo to GitHub.
@@ -42,9 +47,11 @@ See `.env.example`. Required:
 > Free tier may sleep/ pause. For always-on, switch the instance to Starter.
 
 ## Notes
-- Bot **ignores tweets without photos**.
-- Uses three inputs for nano-banana: `[person_photo_url, SUNGLASSES_URL, BACKGROUND_URL]`.
+- Bot processes tweets with attached photos OR uses profile pictures when no photo is attached.
+- Image source priority: 1) Attached photo, 2) Mentioned user's avatar, 3) Author's avatar.
+- Uses three inputs for nano-banana: `[person_image_url, SUNGLASSES_URL, BACKGROUND_URL]`.
 - Replies with a PNG via v1.1 media upload.
+- Avoids duplicate processing by liking processed tweets (Twitter-as-state).
 - Do **not** commit `.env` or real secrets. Keep `.env` out of git.
 
 ## License
