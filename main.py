@@ -212,11 +212,16 @@ def preload_liked_tweets():
         return
     
     try:
-        # Get bot's user ID
+        # Get bot's user ID and authenticated username
         me = client.get_me()
         if me.data:
             bot_user_id = me.data.id
-            print(f"🤖 Bot user ID: {bot_user_id}")
+            bot_username = me.data.username
+            print(f"🤖 Authenticated as @{bot_username} (ID: {bot_user_id})")
+            
+            # Warn if username doesn't match BOT_HANDLE (case-insensitive)
+            if bot_username.lower() != BOT_HANDLE.lower():
+                print(f"⚠️ Warning: Authenticated username (@{bot_username}) doesn't match BOT_HANDLE ({BOT_HANDLE})")
         else:
             print("⚠️ Could not determine bot user ID")
             return
@@ -239,11 +244,16 @@ def preload_liked_tweets():
                 
                 liked_tweets.extend(response.data)
                 
-                # Check for more pages
-                if (hasattr(response, 'meta') and 
-                    hasattr(response.meta, 'next_token') and 
-                    response.meta.next_token):
-                    pagination_token = response.meta.next_token
+                # Check for more pages - support both dict and object forms
+                next_token = None
+                if hasattr(response, 'meta'):
+                    if isinstance(response.meta, dict):
+                        next_token = response.meta.get('next_token')
+                    else:
+                        next_token = getattr(response.meta, 'next_token', None)
+                
+                if next_token:
+                    pagination_token = next_token
                 else:
                     break
                     
@@ -251,9 +261,14 @@ def preload_liked_tweets():
                 print(f"⚠️ Error fetching liked tweets: {e}")
                 break
         
-        # Store tweet IDs in set
-        liked_tweet_ids = {tweet.id for tweet in liked_tweets}
+        # Store tweet IDs as strings in set
+        liked_tweet_ids = {str(tweet.id) for tweet in liked_tweets}
         print(f"📋 Preloaded {len(liked_tweet_ids)} liked tweet IDs")
+        
+        # Log sample IDs to confirm string typing
+        if liked_tweet_ids:
+            sample_ids = list(liked_tweet_ids)[:3]
+            print(f"📋 Sample IDs (type={type(sample_ids[0]).__name__}, len={len(sample_ids[0])}): {sample_ids}")
         
     except Exception as e:
         print(f"⚠️ Failed to preload liked tweets: {e}")
@@ -266,7 +281,7 @@ def mark_tweet_as_processed(tweet_id):
     
     try:
         client.like(tweet_id)
-        liked_tweet_ids.add(tweet_id)
+        liked_tweet_ids.add(str(tweet_id))
         print(f"❤️ Liked tweet {tweet_id} to mark as processed")
     except Exception as e:
         print(f"⚠️ Failed to like tweet {tweet_id}: {e}")
@@ -364,10 +379,15 @@ def reply_with_media(in_reply_to_tweet_id: str, media_id: str, username: str):
 
 
 def process_tweet(tweet, usernames, media_map):
-    # Skip if already liked (processed)
-    if SKIP_IF_LIKED and tweet.id in liked_tweet_ids:
-        print(f"⏩ Skipping {tweet.id}: already processed (liked)")
-        return
+    # Skip if already liked (processed) - use string ID comparison
+    tweet_id_str = str(tweet.id)
+    is_present = tweet_id_str in liked_tweet_ids
+    
+    if SKIP_IF_LIKED:
+        print(f"⏸️  Skip check: id={tweet.id} present={is_present}")
+        if is_present:
+            print(f"⏩ Skipping {tweet.id}: already processed (liked)")
+            return
     
     person_url = determine_person_image_url(tweet, usernames, media_map)
     if not person_url:
