@@ -64,7 +64,7 @@ def save_last_id(tid) -> None:
 
 
 def fetch_mentions(since_id=None):
-    query = f"@{BOT_HANDLE} -is:retweet"
+    query = f"@{BOT_HANDLE} -is:retweet -from:{BOT_HANDLE}"
     return client.search_recent_tweets(
         query=query,
         since_id=since_id,
@@ -187,8 +187,8 @@ def determine_person_image_url(tweet, usernames, media_map):
     # Filter out the author from mentions
     other_mentions = [u for u in mentioned_users if u.lower() != author_username.lower()]
     
-    # 3. If other users mentioned, use first resolvable one
-    for username in other_mentions:
+    # 3. If other users mentioned, use right-most (last) resolvable one
+    for username in reversed(other_mentions):
         profile_url = resolve_user_profile_image(username)
         if profile_url:
             print(f"👤 Using mentioned_user:@{username}: {profile_url}")
@@ -375,6 +375,12 @@ def reply_with_media(in_reply_to_tweet_id: str, media_id: str, username: str):
 
 
 def process_tweet(tweet, usernames, media_map):
+    # Skip if tweet is authored by the bot to prevent self-recursion
+    author_username = usernames.get(str(tweet.author_id), "")
+    if author_username.lower() == BOT_HANDLE.lower():
+        print(f"🔄 Skipping {tweet.id}: tweet authored by bot (@{author_username}) - avoiding self-recursion")
+        return
+    
     # Skip if already liked (processed)
     if SKIP_IF_LIKED and str(tweet.id) in liked_tweet_ids:
         print(f"⏩ Skipping {tweet.id}: already processed (liked)")
