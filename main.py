@@ -4,6 +4,10 @@ import tempfile
 import tweepy
 import requests
 import replicate
+import random
+import string
+from datetime import datetime, timedelta
+from collections import defaultdict
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -18,6 +22,30 @@ BACKGROUND_URL       = os.getenv("BACKGROUND_URL")
 SKIP_IF_LIKED        = os.getenv("SKIP_IF_LIKED", "1") == "1"
 LIKED_PRELOAD_LIMIT  = int(os.getenv("LIKED_PRELOAD_LIMIT", "500"))
 LAST_ID_FILE         = ".last_id"
+
+# New hardening & authenticity config
+LIKE_MODE            = os.getenv("LIKE_MODE", "all")  # all|probabilistic|none
+LIKE_PROB            = float(os.getenv("LIKE_PROB", "0.7"))  # for probabilistic mode
+HUMANIZE_DELAY       = os.getenv("HUMANIZE_DELAY", "1") == "1"
+REPLY_MIN_DELAY      = int(os.getenv("REPLY_MIN_DELAY", "2"))
+REPLY_MAX_DELAY      = int(os.getenv("REPLY_MAX_DELAY", "8"))
+POLL_JITTER_MAX      = int(os.getenv("POLL_JITTER_MAX", "5"))
+PER_USER_MAX         = int(os.getenv("PER_USER_MAX", "0"))  # 0=unlimited
+GLOBAL_MAX           = int(os.getenv("GLOBAL_MAX", "0"))  # 0=unlimited
+ALT_TEXT             = os.getenv("ALT_TEXT", "1") == "1"
+VARIANT_ENABLE       = os.getenv("VARIANT_ENABLE", "0") == "1"
+PROMPT_UNIQUIFIER    = os.getenv("PROMPT_UNIQUIFIER", "1") == "1"
+PROCESSED_STATE_FILE = os.getenv("PROCESSED_STATE_FILE", ".processed_ids")
+PROCESSED_STATE_CAP  = int(os.getenv("PROCESSED_STATE_CAP", "10000"))
+
+# Reply text variants for diversification
+REPLY_VARIANTS = [
+    "@{username}",
+    "@{username} 😎",
+    "@{username} ✨",
+    "@{username} Here you go!",
+    "@{username} Looking good!",
+]
 
 if not BOT_HANDLE:
     raise RuntimeError("BOT_HANDLE is required (without the @).")
@@ -50,6 +78,38 @@ liked_tweet_ids = set()
 user_profile_cache = {}  # username -> profile_image_url
 bot_user_id = None
 
+# Local processed state (independent of likes)
+processed_tweet_ids = set()
+
+# Rate limiting state (resets daily)
+user_reply_counts = defaultdict(int)  # username -> count
+global_reply_count = 0
+rate_limit_reset_date = datetime.now().date()
+
+# Session token for prompt uniquification
+session_token = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+
+# Startup logging
+print(f"🚀 Bot Configuration:")
+print(f"   LIKE_MODE: {LIKE_MODE}")
+if LIKE_MODE == "probabilistic":
+    print(f"   LIKE_PROB: {LIKE_PROB}")
+print(f"   HUMANIZE_DELAY: {HUMANIZE_DELAY}")
+if HUMANIZE_DELAY:
+    print(f"   REPLY_DELAY: {REPLY_MIN_DELAY}-{REPLY_MAX_DELAY}s")
+print(f"   POLL_JITTER_MAX: {POLL_JITTER_MAX}s")
+if PER_USER_MAX > 0:
+    print(f"   PER_USER_MAX: {PER_USER_MAX}/day")
+if GLOBAL_MAX > 0:
+    print(f"   GLOBAL_MAX: {GLOBAL_MAX}/day")
+print(f"   ALT_TEXT: {ALT_TEXT}")
+print(f"   VARIANT_ENABLE: {VARIANT_ENABLE}")
+print(f"   PROMPT_UNIQUIFIER: {PROMPT_UNIQUIFIER}")
+if PROMPT_UNIQUIFIER:
+    print(f"   Session token: #{session_token}")
+print(f"   PROCESSED_STATE_FILE: {PROCESSED_STATE_FILE}")
+print(f"   PROCESSED_STATE_CAP: {PROCESSED_STATE_CAP}")
+
 def load_last_id():
     try:
         with open(LAST_ID_FILE, "r") as f:
@@ -61,6 +121,65 @@ def load_last_id():
 def save_last_id(tid) -> None:
     with open(LAST_ID_FILE, "w") as f:
         f.write(str(tid))
+
+
+def load_processed_ids():
+    """Load processed tweet IDs from local state file."""
+    global processed_tweet_ids
+    try:
+        with open(PROCESSED_STATE_FILE, "r") as f:
+            ids = [line.strip() for line in f if line.strip()]
+            processed_tweet_ids = set(ids[-PROCESSED_STATE_CAP:])
+            print(f"📂 Loaded {len(processed_tweet_ids)} processed IDs from {PROCESSED_STATE_FILE}")
+    except FileNotFoundError:
+        processed_tweet_ids = set()
+        print(f"📂 No existing processed state file, starting fresh")
+
+
+def save_processed_id(tweet_id):
+    """Append tweet ID to local state file."""
+    processed_tweet_ids.add(str(tweet_id))
+    
+    # Trim to cap and write
+    trimmed = list(processed_tweet_ids)[-PROCESSED_STATE_CAP:]
+    try:
+        with open(PROCESSED_STATE_FILE, "w") as f:
+            f.write("\n".join(trimmed) + "\n")
+    except Exception as e:
+        print(f"⚠️ Failed to save processed ID {tweet_id}: {e}")
+
+
+def reset_rate_limits_if_needed():
+    """Reset rate limit counters if it's a new day."""
+    global rate_limit_reset_date, user_reply_counts, global_reply_count
+    today = datetime.now().date()
+    if today > rate_limit_reset_date:
+        print(f"📅 New day detected, resetting rate limits")
+        user_reply_counts.clear()
+        global_reply_count = 0
+        rate_limit_reset_date = today
+
+
+def check_rate_limits(username):
+    """Check if rate limits allow processing. Returns (can_process, reason)."""
+    reset_rate_limits_if_needed()
+    
+    # Check global cap
+    if GLOBAL_MAX > 0 and global_reply_count >= GLOBAL_MAX:
+        return False, f"global daily limit ({GLOBAL_MAX}) reached"
+    
+    # Check per-user cap
+    if PER_USER_MAX > 0 and user_reply_counts[username] >= PER_USER_MAX:
+        return False, f"per-user daily limit ({PER_USER_MAX}) for @{username} reached"
+    
+    return True, ""
+
+
+def increment_rate_limits(username):
+    """Increment rate limit counters after successful reply."""
+    global global_reply_count
+    user_reply_counts[username] += 1
+    global_reply_count += 1
 
 
 def fetch_mentions(since_id=None):
@@ -271,16 +390,24 @@ def preload_liked_tweets():
 
 
 def mark_tweet_as_processed(tweet_id):
-    """Like the tweet to mark it as processed."""
-    if not SKIP_IF_LIKED:
-        return
+    """Like the tweet to mark it as processed (based on LIKE_MODE)."""
+    should_like = False
     
-    try:
-        client.like(tweet_id, user_auth=True)
-        liked_tweet_ids.add(str(tweet_id))
-        print(f"❤️ Liked tweet {tweet_id} to mark as processed")
-    except Exception as e:
-        print(f"⚠️ Failed to like tweet {tweet_id}: {e}")
+    if LIKE_MODE == "all":
+        should_like = True
+    elif LIKE_MODE == "probabilistic":
+        should_like = random.random() < LIKE_PROB
+    # LIKE_MODE == "none" means should_like stays False
+    
+    if should_like:
+        try:
+            client.like(tweet_id, user_auth=True)
+            liked_tweet_ids.add(str(tweet_id))
+            print(f"❤️ Liked tweet {tweet_id}")
+        except Exception as e:
+            print(f"⚠️ Failed to like tweet {tweet_id}: {e}")
+    else:
+        print(f"💭 Not liking tweet {tweet_id} (LIKE_MODE={LIKE_MODE})")
 
 
 def write_bytes_tmp(content: bytes, suffix=".png") -> str:
@@ -298,6 +425,10 @@ def download_tmp(url: str, suffix=".png") -> str:
 
 def run_nano_banana(person_url: str, sunglasses_url: str, background_url: str, prompt: str) -> str:
     """Calls google/nano-banana with three inputs and returns local PNG path."""
+    # Add prompt uniquification if enabled
+    if PROMPT_UNIQUIFIER:
+        prompt = f"{prompt}\n#session:{session_token}"
+    
     out = replicate.run(
         MODEL_REF,
         input={
@@ -325,9 +456,61 @@ def run_nano_banana(person_url: str, sunglasses_url: str, background_url: str, p
         raise RuntimeError(f"Unexpected Replicate output type: {type(out)}")
 
 
+def apply_image_variation(image_path: str) -> str:
+    """Apply subtle variation to image if VARIANT_ENABLE and Pillow available."""
+    if not VARIANT_ENABLE:
+        return image_path
+    
+    try:
+        from PIL import Image
+        import numpy as np
+        
+        img = Image.open(image_path)
+        
+        # Subtle brightness jitter (±0.5%)
+        if img.mode in ("RGB", "RGBA"):
+            arr = np.array(img, dtype=np.float32)
+            brightness_factor = 1.0 + random.uniform(-0.005, 0.005)
+            arr = np.clip(arr * brightness_factor, 0, 255).astype(np.uint8)
+            img = Image.fromarray(arr, mode=img.mode)
+        
+        # Single-pixel alpha nudge (if RGBA)
+        if img.mode == "RGBA":
+            pixels = img.load()
+            width, height = img.size
+            x, y = random.randint(0, width - 1), random.randint(0, height - 1)
+            r, g, b, a = pixels[x, y]
+            pixels[x, y] = (r, g, b, min(255, a + random.randint(0, 1)))
+        
+        # Save variant
+        variant_path = image_path.replace(".png", "_v.png")
+        img.save(variant_path, "PNG")
+        print(f"🎨 Applied subtle variation -> {variant_path}")
+        return variant_path
+    except ImportError:
+        print(f"⚠️ Pillow not available, skipping variation")
+        return image_path
+    except Exception as e:
+        print(f"⚠️ Variation failed: {e}, using original")
+        return image_path
+
+
+
 def upload_media(path: str) -> str:
+    """Upload media and optionally add alt text."""
     media = api_v1.media_upload(filename=path)
-    return str(media.media_id)
+    media_id = str(media.media_id)
+    
+    # Add alt text if enabled
+    if ALT_TEXT:
+        try:
+            alt_text = "Profile image edited with stylish sunglasses and vibrant gradient background"
+            api_v1.create_media_metadata(media_id, alt_text)
+            print(f"📝 Added alt text to media {media_id}")
+        except Exception as e:
+            print(f"⚠️ Failed to add alt text: {e}")
+    
+    return media_id
 
 
 def reply_with_media(in_reply_to_tweet_id: str, media_id: str, username: str):
@@ -337,7 +520,8 @@ def reply_with_media(in_reply_to_tweet_id: str, media_id: str, username: str):
     2. Newer style (if available): reply={}, media={}
     3. v1.1 fallback via api_v1.update_status
     """
-    text = f"@{username}"
+    # Use random reply variant
+    text = random.choice(REPLY_VARIANTS).format(username=username)
 
     # Attempt 1: flattened media_ids + in_reply_to_tweet_id
     try:
@@ -375,44 +559,87 @@ def reply_with_media(in_reply_to_tweet_id: str, media_id: str, username: str):
 
 
 def process_tweet(tweet, usernames, media_map):
-    # Skip if tweet is authored by the bot to prevent self-recursion
+    tweet_id_str = str(tweet.id)
     author_username = usernames.get(str(tweet.author_id), "")
+    
+    # Skip if tweet is authored by the bot to prevent self-recursion
     if author_username.lower() == BOT_HANDLE.lower():
         print(f"🔄 Skipping {tweet.id}: tweet authored by bot (@{author_username}) - avoiding self-recursion")
+        save_processed_id(tweet_id_str)  # Mark as processed to avoid re-queuing
         return
     
-    # Skip if already liked (processed)
-    if SKIP_IF_LIKED and str(tweet.id) in liked_tweet_ids:
+    # Check 1: Local processed state (primary dedupe)
+    if tweet_id_str in processed_tweet_ids:
+        print(f"⏩ Skipping {tweet.id}: already in local processed state")
+        return
+    
+    # Check 2: Liked set (for backward compatibility with SKIP_IF_LIKED)
+    if SKIP_IF_LIKED and tweet_id_str in liked_tweet_ids:
         print(f"⏩ Skipping {tweet.id}: already processed (liked)")
+        save_processed_id(tweet_id_str)  # Sync to local state
         return
     
+    # Check 3: Rate limits
+    can_process, reason = check_rate_limits(author_username)
+    if not can_process:
+        print(f"🚫 Skipping {tweet.id}: {reason}")
+        save_processed_id(tweet_id_str)  # Mark as processed to prevent re-queuing churn
+        return
+    
+    # Determine image source
     person_url = determine_person_image_url(tweet, usernames, media_map)
     if not person_url:
         has_attachments = bool(getattr(tweet, "attachments", None))
         print(f"⏭️  {tweet.id}: no usable image source (attachments={has_attachments}); skipping.")
+        save_processed_id(tweet_id_str)  # Mark as processed
         return
     if not SUNGLASSES_URL or not BACKGROUND_URL:
         print("❗ Set SUNGLASSES_URL and BACKGROUND_URL in your environment")
         return
 
+    # Humanization: random delay before processing
+    if HUMANIZE_DELAY:
+        delay = random.uniform(REPLY_MIN_DELAY, REPLY_MAX_DELAY)
+        print(f"⏱️ Waiting {delay:.1f}s before replying to {tweet.id}")
+        time.sleep(delay)
+
+    # Generate image
     out_path = run_nano_banana(person_url, SUNGLASSES_URL, BACKGROUND_URL, NANO_PROMPT)
+    variant_path = None
     try:
-        media_id = upload_media(out_path)
+        # Apply variation if enabled
+        final_path = apply_image_variation(out_path)
+        if final_path != out_path:
+            variant_path = final_path
+        
+        # Upload and reply
+        media_id = upload_media(final_path)
         handle = usernames.get(str(tweet.author_id), "")
         reply_with_media(str(tweet.id), media_id, handle)
         print(f"✅ Replied to {tweet.id} (@{handle})")
         
-        # Mark as processed
+        # Mark as processed (local state + optional like)
+        save_processed_id(tweet_id_str)
         mark_tweet_as_processed(tweet.id)
         
+        # Increment rate limits
+        increment_rate_limits(author_username)
+        
     finally:
+        # Cleanup temp files
         try:
             os.remove(out_path)
+            if variant_path and variant_path != out_path:
+                os.remove(variant_path)
         except Exception:
             pass
 
 
 def main():
+    # Load local processed state
+    load_processed_ids()
+    
+    # Preload liked tweets (for backward compat with SKIP_IF_LIKED)
     preload_liked_tweets()
     
     last_id = load_last_id()
@@ -432,7 +659,12 @@ def main():
                 save_last_id(last_id)
         except Exception as e:
             print("⚠️ error:", e)
-        time.sleep(POLL_SECONDS)
+        
+        # Add jitter to poll interval
+        jitter = random.uniform(0, POLL_JITTER_MAX)
+        sleep_time = POLL_SECONDS + jitter
+        print(f"😴 Sleeping {sleep_time:.1f}s (base={POLL_SECONDS}s + jitter={jitter:.1f}s)")
+        time.sleep(sleep_time)
 
 if __name__ == "__main__":
     main()
