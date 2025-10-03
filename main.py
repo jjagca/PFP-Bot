@@ -37,6 +37,7 @@ VARIANT_ENABLE       = os.getenv("VARIANT_ENABLE", "0") == "1"
 PROMPT_UNIQUIFIER    = os.getenv("PROMPT_UNIQUIFIER", "1") == "1"
 PROCESSED_STATE_FILE = os.getenv("PROCESSED_STATE_FILE", ".processed_ids")
 PROCESSED_STATE_CAP  = int(os.getenv("PROCESSED_STATE_CAP", "10000"))
+IGNORE_HISTORY       = os.getenv("IGNORE_HISTORY", "0") == "1"
 
 # Reply text variants for diversification
 REPLY_VARIANTS = [
@@ -89,6 +90,9 @@ rate_limit_reset_date = datetime.now().date()
 # Session token for prompt uniquification
 session_token = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
 
+# Capture startup time for history gating
+start_time = datetime.utcnow()
+
 # Startup logging
 print(f"🚀 Bot Configuration:")
 print(f"   LIKE_MODE: {LIKE_MODE}")
@@ -109,6 +113,7 @@ if PROMPT_UNIQUIFIER:
     print(f"   Session token: #{session_token}")
 print(f"   PROCESSED_STATE_FILE: {PROCESSED_STATE_FILE}")
 print(f"   PROCESSED_STATE_CAP: {PROCESSED_STATE_CAP}")
+print(f"   IGNORE_HISTORY: {IGNORE_HISTORY}")
 
 def load_last_id():
     try:
@@ -323,6 +328,34 @@ def determine_person_image_url(tweet, usernames, media_map):
     return None
 
 
+def initialize_start_cursor():
+    """
+    Initialize cursor to skip all pre-existing mentions when IGNORE_HISTORY=1.
+    Fetches mentions without processing and sets last_id to the newest one.
+    """
+    try:
+        print("🧭 IGNORE_HISTORY enabled - fetching existing mentions to establish cursor...")
+        resp = fetch_mentions(since_id=None)
+        
+        if resp.data:
+            tweets = sorted(resp.data, key=lambda t: int(t.id))
+            max_id = tweets[-1].id
+            save_last_id(max_id)
+            
+            # Mark all as locally processed to avoid churn if they slip through
+            for t in tweets:
+                save_processed_id(str(t.id))
+            
+            print(f"🧭 History ignored: cursor set to last_id={max_id}, marked {len(tweets)} existing mentions as processed")
+            return max_id
+        else:
+            print("🧭 No existing mentions found, starting from current time")
+            return None
+    except Exception as e:
+        print(f"⚠️ Failed to initialize start cursor: {e}")
+        return None
+
+
 def preload_liked_tweets():
     """Preload recent liked tweet IDs for the bot user."""
     global bot_user_id, liked_tweet_ids
@@ -516,12 +549,20 @@ def upload_media(path: str) -> str:
 def reply_with_media(in_reply_to_tweet_id: str, media_id: str, username: str):
     """
     Try multiple Tweepy signatures for compatibility.
+    Returns True on success, False on permanent failure.
+    
     1. Older v2 style: media_ids=[...] (no 'media' dict)
     2. Newer style (if available): reply={}, media={}
     3. v1.1 fallback via api_v1.update_status
     """
     # Use random reply variant
     text = random.choice(REPLY_VARIANTS).format(username=username)
+    
+    # Permanent failure keywords
+    permanent_failure_keywords = [
+        'forbidden', 'not authorized', 'read-only', 'read only',
+        'permission', 'suspended', 'blocked', 'unauthorized'
+    ]
 
     # Attempt 1: flattened media_ids + in_reply_to_tweet_id
     try:
@@ -530,9 +571,14 @@ def reply_with_media(in_reply_to_tweet_id: str, media_id: str, username: str):
             in_reply_to_tweet_id=in_reply_to_tweet_id,
             media_ids=[media_id],
         )
-        return
+        return True
     except TypeError:
         pass
+    except Exception as e:
+        error_msg = str(e).lower()
+        if any(keyword in error_msg for keyword in permanent_failure_keywords):
+            print(f"🚫 Permanent posting failure (attempt 1): {e}")
+            return False
 
     # Attempt 2: nested dict style
     try:
@@ -541,9 +587,14 @@ def reply_with_media(in_reply_to_tweet_id: str, media_id: str, username: str):
             reply={"in_reply_to_tweet_id": in_reply_to_tweet_id},
             media={"media_ids": [media_id]},
         )
-        return
+        return True
     except TypeError:
         pass
+    except Exception as e:
+        error_msg = str(e).lower()
+        if any(keyword in error_msg for keyword in permanent_failure_keywords):
+            print(f"🚫 Permanent posting failure (attempt 2): {e}")
+            return False
 
     # Attempt 3: v1.1 fallback
     try:
@@ -553,9 +604,15 @@ def reply_with_media(in_reply_to_tweet_id: str, media_id: str, username: str):
             auto_populate_reply_metadata=True,
             media_ids=[media_id],
         )
-        return
+        return True
     except Exception as e:
-        print("⚠️ failed to send reply via all methods:", e)
+        error_msg = str(e).lower()
+        if any(keyword in error_msg for keyword in permanent_failure_keywords):
+            print(f"🚫 Permanent posting failure (v1.1 fallback): {e}")
+            return False
+        else:
+            print(f"⚠️ Failed to send reply via all methods: {e}")
+            return False
 
 
 def process_tweet(tweet, usernames, media_map):
@@ -567,6 +624,14 @@ def process_tweet(tweet, usernames, media_map):
         print(f"🔄 Skipping {tweet.id}: tweet authored by bot (@{author_username}) - avoiding self-recursion")
         save_processed_id(tweet_id_str)  # Mark as processed to avoid re-queuing
         return
+    
+    # Check 0: Time gate for defensive skipping when IGNORE_HISTORY is enabled
+    if IGNORE_HISTORY:
+        tweet_created_at = getattr(tweet, "created_at", None)
+        if tweet_created_at and tweet_created_at < start_time:
+            print(f"🕰️ Skipping {tweet.id}: tweet created before bot startup (history gate)")
+            save_processed_id(tweet_id_str)
+            return
     
     # Check 1: Local processed state (primary dedupe)
     if tweet_id_str in processed_tweet_ids:
@@ -615,15 +680,18 @@ def process_tweet(tweet, usernames, media_map):
         # Upload and reply
         media_id = upload_media(final_path)
         handle = usernames.get(str(tweet.author_id), "")
-        reply_with_media(str(tweet.id), media_id, handle)
-        print(f"✅ Replied to {tweet.id} (@{handle})")
+        reply_success = reply_with_media(str(tweet.id), media_id, handle)
         
-        # Mark as processed (local state + optional like)
+        # Always mark as processed locally to prevent reprocessing
         save_processed_id(tweet_id_str)
-        mark_tweet_as_processed(tweet.id)
         
-        # Increment rate limits
-        increment_rate_limits(author_username)
+        if reply_success:
+            print(f"✅ Replied to {tweet.id} (@{handle})")
+            # Only like and increment rate limits on successful post
+            mark_tweet_as_processed(tweet.id)
+            increment_rate_limits(author_username)
+        else:
+            print(f"📝 Marked {tweet.id} as processed (no post) to prevent reprocessing")
         
     finally:
         # Cleanup temp files
@@ -642,7 +710,14 @@ def main():
     # Preload liked tweets (for backward compat with SKIP_IF_LIKED)
     preload_liked_tweets()
     
-    last_id = load_last_id()
+    # Initialize cursor if IGNORE_HISTORY is enabled
+    if IGNORE_HISTORY:
+        last_id = initialize_start_cursor()
+        if last_id is None:
+            last_id = load_last_id()
+    else:
+        last_id = load_last_id()
+    
     print(f"🚀 bot up. last_id={last_id}")
     while True:
         try:
@@ -653,7 +728,14 @@ def main():
                 media_map = media_map_from_includes(resp.includes)
 
                 for t in tweets:
-                    process_tweet(t, usernames, media_map)
+                    try:
+                        process_tweet(t, usernames, media_map)
+                    except Exception as e:
+                        # Catch errors in individual tweet processing to prevent blocking last_id update
+                        tweet_id = getattr(t, 'id', 'unknown')
+                        print(f"⚠️ Error processing tweet {tweet_id}: {e}")
+                        # Mark as processed to prevent retry loop
+                        save_processed_id(str(tweet_id))
 
                 last_id = tweets[-1].id
                 save_last_id(last_id)

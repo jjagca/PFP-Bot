@@ -64,6 +64,9 @@ These features help reduce spam/automation signals while maintaining backward co
 #### State Management
 - **`PROCESSED_STATE_FILE`** (default: `.processed_ids`) - Local file for tracking processed tweet IDs
 - **`PROCESSED_STATE_CAP`** (default: `10000`) - Maximum number of processed IDs to keep in state file
+- **`IGNORE_HISTORY`** (default: `0`) - Ignore all pre-existing mentions at startup (1=enabled, 0=disabled)
+  - When enabled, only processes mentions created after the bot starts
+  - Useful for avoiding backlog processing when restarting the bot
 
 ## Features
 
@@ -87,6 +90,13 @@ These features help reduce spam/automation signals while maintaining backward co
 - **Graceful fallbacks**: Pillow usage is optional; features degrade gracefully when unavailable
 - **Comprehensive logging**: Clear markers for all skip conditions and processing stages
 - **Backward compatibility**: All new features are opt-in or have safe defaults
+- **Posting failure resilience**: Prevents infinite reprocessing when replies fail (e.g., Free tier restrictions)
+  - Classifies permanent failures (forbidden, read-only, unauthorized)
+  - Always marks tweets as locally processed to prevent retry loops
+  - Individual tweet errors don't block cursor advancement
+- **History ignore option**: Skip all pre-existing mentions at startup with `IGNORE_HISTORY=1`
+  - Establishes cursor at the newest existing mention
+  - Time gate prevents processing tweets created before bot startup
 
 ## Render (free tier) deploy
 
