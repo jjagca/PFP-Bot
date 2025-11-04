@@ -628,6 +628,8 @@ def process_tweet(tweet, usernames, media_map):
     # Check 0: Time gate for defensive skipping when IGNORE_HISTORY is enabled
     if IGNORE_HISTORY:
         tweet_created_at = getattr(tweet, "created_at", None)
+        # Defensive normalization: Tweepy tweet.created_at should be timezone-aware UTC,
+        # but if it's naive, assume UTC to prevent comparison errors
         if tweet_created_at and tweet_created_at.tzinfo is None:
             tweet_created_at = tweet_created_at.replace(tzinfo=timezone.utc)
         if tweet_created_at and tweet_created_at < start_time:
