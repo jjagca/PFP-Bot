@@ -6,7 +6,7 @@ import requests
 import replicate
 import random
 import string
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from dotenv import load_dotenv
 
@@ -85,13 +85,13 @@ processed_tweet_ids = set()
 # Rate limiting state (resets daily)
 user_reply_counts = defaultdict(int)  # username -> count
 global_reply_count = 0
-rate_limit_reset_date = datetime.now().date()
+rate_limit_reset_date = datetime.now(timezone.utc).date()
 
 # Session token for prompt uniquification
 session_token = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
 
 # Capture startup time for history gating
-start_time = datetime.utcnow()
+start_time = datetime.now(timezone.utc)
 
 # Startup logging
 print(f"🚀 Bot Configuration:")
@@ -157,7 +157,7 @@ def save_processed_id(tweet_id):
 def reset_rate_limits_if_needed():
     """Reset rate limit counters if it's a new day."""
     global rate_limit_reset_date, user_reply_counts, global_reply_count
-    today = datetime.now().date()
+    today = datetime.now(timezone.utc).date()
     if today > rate_limit_reset_date:
         print(f"📅 New day detected, resetting rate limits")
         user_reply_counts.clear()
@@ -628,6 +628,8 @@ def process_tweet(tweet, usernames, media_map):
     # Check 0: Time gate for defensive skipping when IGNORE_HISTORY is enabled
     if IGNORE_HISTORY:
         tweet_created_at = getattr(tweet, "created_at", None)
+        if tweet_created_at and tweet_created_at.tzinfo is None:
+            tweet_created_at = tweet_created_at.replace(tzinfo=timezone.utc)
         if tweet_created_at and tweet_created_at < start_time:
             print(f"🕰️ Skipping {tweet.id}: tweet created before bot startup (history gate)")
             save_processed_id(tweet_id_str)
